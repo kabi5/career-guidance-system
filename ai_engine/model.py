@@ -38,7 +38,7 @@ def _onehot_from_code(code, scores=None):
     for ch in code:
         for name, short in DIM_SHORT.items():
             if short == ch:
-                vec[RIASEC_INDEX[name]] = 1.0
+                vec[RIASEC_INDEX[short]] = 1.0
     if vec.sum() == 0:
         vec[:] = 1.0 / len(DIMENSIONS)
     return vec
