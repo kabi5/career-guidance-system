@@ -1,0 +1,6 @@
+﻿{
+  "riasec_scores": {"R":40,"I":85,"A":30,"S":50,"E":45,"C":60},
+  "marks": {"maths":78,"science":72,"english":65},
+  "subjects": ["Mathematics","Physical Sciences","Computer Studies"],
+  "top_n": 5
+}
