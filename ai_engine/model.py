@@ -10,9 +10,14 @@ BASE_DIR   = os.path.dirname(__file__)
 CAREERS_P  = os.path.join(BASE_DIR, "data", "processed", "careers.json")
 EDU_P      = os.path.join(BASE_DIR, "data", "processed", "education.json")
 
+# DIMENSIONS = ["R", "I", "A", "S", "E", "C"]
 RIASEC_INDEX = {d: i for i, d in enumerate(DIMENSIONS)}
+
+# careers.json stores scores under full names ("Realistic", ...)
 DIM_SHORT    = {"Realistic": "R", "Investigative": "I", "Artistic": "A",
                 "Social": "S", "Enterprising": "E", "Conventional": "C"}
+SHORT_TO_FULL = {v: k for k, v in DIM_SHORT.items()}
+
 
 # ---- Load once at import time --------------------------------------------
 def _load():
@@ -25,20 +30,25 @@ def _load():
         education = {"categories": {}, "by_occupation": {}}
     return careers, education
 
+
 CAREERS, EDUCATION = _load()
 
 
-def _onehot_from_code(code, scores=None):
-    """Prefer real RIASEC scores if available; else build from the 3-letter code."""
+def _career_vector(code, scores=None):
+    """
+    Prefer the career's real RIASEC scores (keyed by full name);
+    otherwise build a vector from its Holland code letters.
+    Always returns a vector ordered like DIMENSIONS (R, I, A, S, E, C).
+    """
     if scores:
-        vec = np.array([scores.get(d, 0) for d in DIMENSIONS], dtype=float)
+        vec = np.array([scores.get(SHORT_TO_FULL[d], 0) for d in DIMENSIONS], dtype=float)
         if vec.sum() > 0:
             return vec
+
     vec = np.zeros(len(DIMENSIONS))
-    for ch in code:
-        for name, short in DIM_SHORT.items():
-            if short == ch:
-                vec[RIASEC_INDEX[name]] = 1.0
+    for ch in (code or ""):
+        if ch in RIASEC_INDEX:
+            vec[RIASEC_INDEX[ch]] = 1.0
     if vec.sum() == 0:
         vec[:] = 1.0 / len(DIMENSIONS)
     return vec
@@ -46,13 +56,12 @@ def _onehot_from_code(code, scores=None):
 
 def _academic_fit(career, marks, subjects):
     """
-    Heuristic academic fit. Since we don't have per-career subject requirements
-    in the O*NET files, we infer them from the education level + RIASEC profile.
+    Heuristic academic fit, inferred from the RIASEC profile since the
+    O*NET files carry no per-career subject requirements.
     """
-    score = 0.4   # baseline
+    score = 0.4  # baseline
 
-    # Maths matters a lot for Investigative / Conventional / Realistic occupations
-    profile = career.get("riasec_code", "")
+    profile = career.get("riasec_code", "") or ""
     maths   = float(marks.get("maths", 0) or 0)
     science = float(marks.get("science", 0) or 0)
     english = float(marks.get("english", 0) or 0)
@@ -78,14 +87,16 @@ def recommend(riasec_scores, marks, subjects, aspirations="", top_n=5,
     subjects:      list of subject names
     aspirations:   free-text string
     top_n:         number of results
-    education_filter: optional list of education categories (1-12) to include;
-                      if None, all are kept. Example: [5,6,7,8] for Diploma/Bachelor.
+    education_filter: optional list of education categories (1-12) to include
     """
+    marks = marks or {}
+    subjects = list(subjects) if subjects else []
+
     learner_vec = np.array([riasec_scores.get(d, 0) for d in DIMENSIONS], dtype=float)
     if learner_vec.sum() == 0:
         learner_vec = np.ones(len(DIMENSIONS)) / len(DIMENSIONS)
-
     learner_vec = learner_vec.reshape(1, -1)
+
     learner_code = top_three_code(riasec_scores)
     aspiration_text = (aspirations or "").lower()
 
@@ -96,17 +107,16 @@ def recommend(riasec_scores, marks, subjects, aspirations="", top_n=5,
         # Education filter
         edu_entry = EDUCATION.get("by_occupation", {}).get(soc)
         if education_filter and edu_entry:
-            top_cat = edu_entry.get("most_common_category")
-            if top_cat not in education_filter:
+            if edu_entry.get("most_common_category") not in education_filter:
                 continue
 
         # Interest similarity
-        career_vec = _onehot_from_code(career.get("riasec_code", ""),
-                                       scores=career.get("riasec_scores")).reshape(1, -1)
+        career_vec = _career_vector(career.get("riasec_code", ""),
+                                    scores=career.get("riasec_scores")).reshape(1, -1)
         interest_sim = float(cosine_similarity(learner_vec, career_vec)[0][0])
 
         academic = _academic_fit(career, marks, subjects)
-        demand   = DEMAND_WEIGHT.get(career.get("demand_level", "high"), 0.75)
+        demand   = DEMAND_WEIGHT.get(career.get("demand_level", "medium"), 0.75)
 
         # Aspiration bonus: title keyword match
         bonus = 0.0
@@ -143,7 +153,8 @@ def _build_explanation(career, scores, learner_code, academic, demand):
     top = max(scores, key=scores.get)
     parts = [
         f"Your top RIASEC interest is {top} ({scores[top]:.0f}%).",
-        f"Your interest profile ({learner_code}) aligns with the {career.get('riasec_code','?')} profile of {career['title']}.",
+        f"Your interest profile ({learner_code}) aligns with the "
+        f"{career.get('riasec_code', '?')} profile of {career['title']}.",
     ]
     if academic > 0.65:
         parts.append("Your marks and subject combination match well.")
@@ -151,17 +162,18 @@ def _build_explanation(career, scores, learner_code, academic, demand):
         parts.append("Some subjects need strengthening to improve your readiness.")
     else:
         parts.append("Consider working on the key subjects for this field.")
+
     parts.append({
         "high": "This occupation is in high demand.",
         "medium": "This occupation has moderate demand.",
-        "low": "This occupation has lower demand — explore related specialisations.",
-    }.get(career.get("demand_level", "medium")))
+        "low": "This occupation has lower demand; explore related specialisations.",
+    }.get(career.get("demand_level", "medium"), "This occupation has moderate demand."))
     return " ".join(parts)
 
 
 def _infer_subjects(career):
     """Best-effort subject recommendation from the RIASEC profile."""
-    code = career.get("riasec_code", "")
+    code = career.get("riasec_code", "") or ""
     subs = []
     if "R" in code:
         subs += ["Mathematics", "Physical Sciences"]
@@ -175,7 +187,6 @@ def _infer_subjects(career):
         subs += ["English", "Life Orientation"]
     if "E" in code:
         subs += ["Business Studies", "Mathematics"]
-    # Deduplicate, keep order
     seen, out = set(), []
     for s in subs:
         if s not in seen:

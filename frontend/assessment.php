@@ -3,6 +3,7 @@ require_once 'config/db.php';
 require_login();
 
 $questions = db()->query('SELECT * FROM assessment_questions ORDER BY id')->fetchAll();
+$error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Build responses payload
@@ -22,11 +23,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $payload = [
         'responses' => $responses,
         'marks' => [
-            'maths' => (float)($profile['maths_mark'] ?? 0),
+            'maths'   => (float)($profile['maths_mark'] ?? 0),
             'science' => (float)($profile['science_mark'] ?? 0),
             'english' => (float)($profile['english_mark'] ?? 0),
         ],
-        'subjects' => array_filter(array_map('trim', explode(',', $profile['subjects'] ?? ''))),
+        'subjects' => array_values(array_filter(
+            array_map('trim', explode(',', $profile['subjects'] ?? ''))
+        )),
         'aspirations' => $profile['aspirations'] ?? '',
         'top_n' => 5,
     ];
@@ -42,6 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ]);
     $resp = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr = curl_error($ch);
     curl_close($ch);
 
     if ($httpCode === 200 && $resp) {
@@ -58,28 +62,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Clear old recs and save new
         db()->prepare('DELETE FROM recommendations WHERE user_id = ?')->execute([$_SESSION['user_id']]);
         $insR = db()->prepare('
-                INSERT INTO recommendations
-                    (user_id, career_title, match_score, explanation,
-                    recommended_subjects, pathway, holland_code, education_level)
-                VALUES (?,?,?,?,?,?,?,?)
-    ');
-    foreach ($data['recommendations'] as $r) {
-        $insR->execute([
-            $_SESSION['user_id'],
-            $r['title'],
-            $r['match_score'],
-            $r['explanation'],
-            $r['recommended_subjects'],
-            $r['pathway'],
-            $r['holland_code']   ?? null,
-            $r['education_level'] ?? null,
-        ]);
-    }
+            INSERT INTO recommendations
+                (user_id, career_title, match_score, explanation,
+                 recommended_subjects, pathway, holland_code, education_level)
+            VALUES (?,?,?,?,?,?,?,?)
+        ');
+        foreach ($data['recommendations'] as $r) {
+            $insR->execute([
+                $_SESSION['user_id'],
+                $r['title'],
+                $r['match_score'],
+                $r['explanation'],
+                $r['recommended_subjects'],
+                $r['pathway'],
+                $r['holland_code']    ?? null,
+                $r['education_level'] ?? null,
+            ]);
+        }
 
         header('Location: dashboard.php');
         exit;
     }
-    $error = 'Could not generate recommendations. Is the AI engine running?';
+
+    $error = 'Could not generate recommendations. Is the AI engine running?'
+           . ' (HTTP ' . (int)$httpCode . ($curlErr ? ', ' . $curlErr : '') . ')';
 }
 ?>
 <!DOCTYPE html>
