@@ -1,25 +1,29 @@
-"""Hybrid recommendation engine: RIASEC similarity + academic fit + demand + education filter."""
+"""Hybrid recommendation engine:
+RIASEC similarity + academic fit + demand + local programme availability."""
 import json
 import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from riasec import DIMENSIONS, top_three_code
+from programmes import programmes_for_career, local_availability_score
 
 BASE_DIR   = os.path.dirname(__file__)
 CAREERS_P  = os.path.join(BASE_DIR, "data", "processed", "careers.json")
 EDU_P      = os.path.join(BASE_DIR, "data", "processed", "education.json")
 
-# DIMENSIONS = ["R", "I", "A", "S", "E", "C"]
 RIASEC_INDEX = {d: i for i, d in enumerate(DIMENSIONS)}
-
-# careers.json stores scores under full names ("Realistic", ...)
 DIM_SHORT    = {"Realistic": "R", "Investigative": "I", "Artistic": "A",
                 "Social": "S", "Enterprising": "E", "Conventional": "C"}
 SHORT_TO_FULL = {v: k for k, v in DIM_SHORT.items()}
 
+# Score weights (sum to 1.0; aspiration bonus is added on top)
+W_INTEREST = 0.45
+W_ACADEMIC = 0.25
+W_DEMAND   = 0.10
+W_LOCAL    = 0.20
 
-# ---- Load once at import time --------------------------------------------
+
 def _load():
     with open(CAREERS_P, "r", encoding="utf-8") as f:
         careers = json.load(f)
@@ -35,16 +39,10 @@ CAREERS, EDUCATION = _load()
 
 
 def _career_vector(code, scores=None):
-    """
-    Prefer the career's real RIASEC scores (keyed by full name);
-    otherwise build a vector from its Holland code letters.
-    Always returns a vector ordered like DIMENSIONS (R, I, A, S, E, C).
-    """
     if scores:
         vec = np.array([scores.get(SHORT_TO_FULL[d], 0) for d in DIMENSIONS], dtype=float)
         if vec.sum() > 0:
             return vec
-
     vec = np.zeros(len(DIMENSIONS))
     for ch in (code or ""):
         if ch in RIASEC_INDEX:
@@ -55,12 +53,7 @@ def _career_vector(code, scores=None):
 
 
 def _academic_fit(career, marks, subjects):
-    """
-    Heuristic academic fit, inferred from the RIASEC profile since the
-    O*NET files carry no per-career subject requirements.
-    """
-    score = 0.4  # baseline
-
+    score = 0.4
     profile = career.get("riasec_code", "") or ""
     maths   = float(marks.get("maths", 0) or 0)
     science = float(marks.get("science", 0) or 0)
@@ -72,7 +65,6 @@ def _academic_fit(career, marks, subjects):
         score += (science / 100.0) * 0.20
     if any(ch in profile for ch in ("S", "A", "E")):
         score += (english / 100.0) * 0.25
-
     return min(score, 1.0)
 
 
@@ -81,14 +73,6 @@ DEMAND_WEIGHT = {"high": 1.0, "medium": 0.75, "low": 0.5}
 
 def recommend(riasec_scores, marks, subjects, aspirations="", top_n=5,
               education_filter=None, min_score=0.30):
-    """
-    riasec_scores: dict {"R":0-100, "I":0-100, ...}
-    marks:         dict {"maths":70,"science":65,"english":72}
-    subjects:      list of subject names
-    aspirations:   free-text string
-    top_n:         number of results
-    education_filter: optional list of education categories (1-12) to include
-    """
     marks = marks or {}
     subjects = list(subjects) if subjects else []
 
@@ -104,13 +88,11 @@ def recommend(riasec_scores, marks, subjects, aspirations="", top_n=5,
     for career in CAREERS:
         soc = career.get("soc_code", "")
 
-        # Education filter
         edu_entry = EDUCATION.get("by_occupation", {}).get(soc)
         if education_filter and edu_entry:
             if edu_entry.get("most_common_category") not in education_filter:
                 continue
 
-        # Interest similarity
         career_vec = _career_vector(career.get("riasec_code", ""),
                                     scores=career.get("riasec_scores")).reshape(1, -1)
         interest_sim = float(cosine_similarity(learner_vec, career_vec)[0][0])
@@ -118,38 +100,40 @@ def recommend(riasec_scores, marks, subjects, aspirations="", top_n=5,
         academic = _academic_fit(career, marks, subjects)
         demand   = DEMAND_WEIGHT.get(career.get("demand_level", "medium"), 0.75)
 
-        # Aspiration bonus: title keyword match
+        local_progs = programmes_for_career(career["title"], subjects)
+        local = local_availability_score(local_progs)
+
         bonus = 0.0
         title_words = career["title"].lower().split()
         if any(w in aspiration_text for w in title_words if len(w) > 3):
             bonus = 0.10
 
-        final = (interest_sim * 0.55) + (academic * 0.30) + (demand * 0.15) + bonus
+        final = (interest_sim * W_INTEREST + academic * W_ACADEMIC +
+                 demand * W_DEMAND + local * W_LOCAL + bonus)
         final = max(0.0, min(final, 1.0))
-
         if final < min_score:
             continue
-
-        explanation = _build_explanation(career, riasec_scores, learner_code, academic, demand)
 
         results.append({
             "title": career["title"],
             "soc_code": soc,
             "match_score": round(final * 100, 2),
             "holland_code": career.get("riasec_code", ""),
-            "explanation": explanation,
+            "explanation": _build_explanation(career, riasec_scores, learner_code,
+                                              academic, demand, local_progs),
             "recommended_subjects": _infer_subjects(career),
-            "pathway": _pathway_for(career, edu_entry),
+            "pathway": _pathway_for(edu_entry, local_progs),
             "education_level": edu_entry.get("most_common_label") if edu_entry else "Not specified",
             "demand_level": career.get("demand_level", "medium"),
             "description": career.get("description", ""),
+            "local_programmes": local_progs,
         })
 
     results.sort(key=lambda r: r["match_score"], reverse=True)
     return results[:top_n]
 
 
-def _build_explanation(career, scores, learner_code, academic, demand):
+def _build_explanation(career, scores, learner_code, academic, demand, local_progs):
     top = max(scores, key=scores.get)
     parts = [
         f"Your top RIASEC interest is {top} ({scores[top]:.0f}%).",
@@ -163,6 +147,17 @@ def _build_explanation(career, scores, learner_code, academic, demand):
     else:
         parts.append("Consider working on the key subjects for this field.")
 
+    if local_progs:
+        best = local_progs[0]
+        parts.append(f"You can study towards this in Lesotho, for example "
+                     f"{best['programme']} at {best['university']}.")
+        if best["missing_subjects"]:
+            parts.append("Subjects to add for that programme: "
+                         + ", ".join(best["missing_subjects"]) + ".")
+    else:
+        parts.append("No matching programme is listed yet for local institutions; "
+                     "you may need to study outside Lesotho or in a related field.")
+
     parts.append({
         "high": "This occupation is in high demand.",
         "medium": "This occupation has moderate demand.",
@@ -172,7 +167,6 @@ def _build_explanation(career, scores, learner_code, academic, demand):
 
 
 def _infer_subjects(career):
-    """Best-effort subject recommendation from the RIASEC profile."""
     code = career.get("riasec_code", "") or ""
     subs = []
     if "R" in code:
@@ -195,7 +189,9 @@ def _infer_subjects(career):
     return ", ".join(out[:4])
 
 
-def _pathway_for(career, edu_entry):
+def _pathway_for(edu_entry, local_progs):
+    if local_progs:
+        return "; ".join(f"{p['programme']} ({p['university']})" for p in local_progs[:3])
     if edu_entry:
         return edu_entry.get("most_common_label", "Post-secondary study")
     return "Post-secondary study"

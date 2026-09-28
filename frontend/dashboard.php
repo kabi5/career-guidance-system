@@ -80,6 +80,11 @@ $first = substr($assessment['top_interest'], 0, 1);
       <?php endif; ?>
     </section>
   <?php endif; ?>
+    <section class="card">
+    <h2>Career assistant</h2>
+    <p class="muted">Got questions about careers, subjects or where to study in Lesotho?</p>
+    <a class="btn secondary" href="chat.php">Ask the assistant</a>
+  </section>
 </main>
 </body>
 </html>

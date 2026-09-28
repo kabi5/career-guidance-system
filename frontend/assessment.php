@@ -60,12 +60,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
 
         // Clear old recs and save new
-        db()->prepare('DELETE FROM recommendations WHERE user_id = ?')->execute([$_SESSION['user_id']]);
+                db()->prepare('DELETE FROM recommendations WHERE user_id = ?')->execute([$_SESSION['user_id']]);
         $insR = db()->prepare('
             INSERT INTO recommendations
                 (user_id, career_title, match_score, explanation,
-                 recommended_subjects, pathway, holland_code, education_level)
-            VALUES (?,?,?,?,?,?,?,?)
+                 recommended_subjects, pathway, holland_code, education_level, local_programmes)
+            VALUES (?,?,?,?,?,?,?,?,?)
         ');
         foreach ($data['recommendations'] as $r) {
             $insR->execute([
@@ -77,6 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $r['pathway'],
                 $r['holland_code']    ?? null,
                 $r['education_level'] ?? null,
+                json_encode($r['local_programmes'] ?? []),
             ]);
         }
 
